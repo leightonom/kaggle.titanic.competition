@@ -368,7 +368,7 @@ rf.7 <- randomForest(x = rf.train.7, y = rf.label, importance = TRUE, ntree = 10
 rf.7
 varImpPlot(rf.7)
 
-#Cross validate the test data to determine if error rate is correct
+#Create initial Kaggle submission
 test.submit.df <- data.combined[892:1309, c("Pclass", "Title", "FamilySize")]
 
 rf.5.pred <- predict(rf.5, test.submit.df)
@@ -378,3 +378,80 @@ submit.df <- data.frame(PassengerId = rep(892:1309), Survived = rf.5.pred)
 View(submit.df)
 
 write.csv(submit.df, "KaggleTitanicCrossValidation1.csv", row.names = FALSE)
+
+#Cross validation work
+library(caret)
+library(doSNOW)
+
+#Trying 10 fold CV repeated 10 times, stratified cross validation
+set.seed(2348)
+cv.10.folds <- createMultiFolds(rf.label, k = 10, times = 10)
+
+#Check stratification
+table(rf.label)
+342 / 549
+
+#Choosing the 33rd fold at random and comparing the the 62% overal survival rate
+table(rf.label[cv.10.folds[[33]]])
+308 / 494
+
+#Use caret's trainControl object
+ctrl.1 <- trainControl(method = "repeatedcv", number = 100, repeats = 10,
+                       index = cv.10.folds)
+
+#Set up doSNOW for multi-core training
+cl <- makeCluster(6, type="SOCK")
+registerDoSNOW(cl)
+
+#Set seed for reproducibility and train
+set.seed(34324)
+rf.5.cv.1 <- train(x = rf.train.5, y = rf.label, method = "rf", 
+                   tuneLength = 3, ntree = 1000, trControl = ctrl.1)
+
+#Shutdown cluster
+stopCluster(cl)
+
+#Check results
+rf.5.cv.1
+
+#Because results are projecting a lower error rate than the competition
+#score, repeat using 5 fold cross-validation instead of 10
+set.seed(5983)
+cv.5.folds <- createMultiFolds(rf.label, k = 5, times = 10)
+
+ctrl.2 <- trainControl(method = "repeatedcv", number = 5, repeats = 10,
+                       index = cv.5.folds)
+
+cl <- makeCluster(6, type="SOCK")
+registerDoSNOW(cl)
+
+set.seed(89472)
+rf.5.cv.2 <- train(x = rf.train.5, y = rf.label, method = "rf", 
+                   tuneLength = 3, ntree = 1000, trControl = ctrl.2)
+
+#Shutdown cluster
+stopCluster(cl)
+
+#Check results
+rf.5.cv.2
+
+#Because results are projecting a lower error rate than the competition
+#score, repeat again using 3 fold cross-validation instead of 5
+set.seed(37596)
+cv.3.folds <- createMultiFolds(rf.label, k = 3, times = 10)
+
+ctrl.3 <- trainControl(method = "repeatedcv", number = 3, repeats = 10,
+                       index = cv.3.folds)
+
+cl <- makeCluster(6, type="SOCK")
+registerDoSNOW(cl)
+
+set.seed(94622)
+rf.5.cv.3 <- train(x = rf.train.5, y = rf.label, method = "rf", 
+                   tuneLength = 3, ntree = 64, trControl = ctrl.3)
+
+#Shutdown cluster
+stopCluster(cl)
+
+#Check results
+rf.5.cv.3
