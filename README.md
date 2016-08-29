@@ -1,6 +1,8 @@
-"# kaggle.titanic.competition" 
+#kaggle.titanic.competition
+#All code, with minor changes, from David Langer's Intro to Data Science
+#with R
 
-# Read in Titanic data
+#Read in Titanic data
 train <- read.csv("train.csv", header = TRUE)
 test <- read.csv("test.csv", header = TRUE)
 
@@ -455,3 +457,213 @@ stopCluster(cl)
 
 #Check results
 rf.5.cv.3
+
+#Using a single decision tree instead of a random forest to get a better
+#feel for the individual features
+library(rpart)
+library(rpart.plot)
+
+#Use 3-fold CV ten times, create a function for it
+rpart.cv <- function(seed, training, labels, ctrl) {
+  cl <- makeCluster(6, type = "SOCK")
+  registerDoSNOW(cl)
+  
+  set.seed(seed)
+  # Leverage formula interface for training
+  rpart.cv <- train(x = training, y = labels, method = "rpart", tuneLength = 30, 
+                    trControl = ctrl)
+  
+  #Shutdown cluster
+  stopCluster(cl)
+  
+  return(rpart.cv)
+}
+
+#Grab features we like best
+features <- c("Pclass", "Title", "FamilySize")
+rpart.train.1 <- data.combined[1:891, features]
+
+#Run the single tree cross-validation by calling the rpart.cv function
+rpart.1.cv.1 <- rpart.cv(94622, rpart.train.1, rf.label, ctrl.3)
+rpart.1.cv.1
+
+#Plot the single tree
+prp(rpart.1.cv.1$finalModel, type = 0, extra = 1, under = TRUE)
+
+#Additional feature engineering to get rid of overfitting
+table(data.combined$Title)
+
+#Drill in on Name attribute to work with title, specifically trying to
+#find out about those 31 "Other" titles
+name.splits <- str_split(data.combined$Name, ",")
+name.splits[1]
+last.names <- sapply(name.splits, "[", 1)
+last.names[1:10]
+data.combined$LastName <- last.names
+
+name.splits <- str_split(sapply(name.splits, "[", 2), " ")
+Titles <- sapply(name.splits, "[", 2)
+unique(Titles)
+
+#What is up with a title of "the"
+data.combined[which(Titles == "the"),]
+
+#Add additional gender depth to previously "other" titles
+#Note, moving Mlle, etc. into Miss, etc.
+Titles[Titles %in% c("Dona.", "the")] <- "Lady."
+Titles[Titles %in% c("Mlle.", "Ms.")] <- "Miss."
+Titles[Titles == "Mme."] <- "Mrs."
+Titles[Titles %in% c("Don.", "Jonkheer.")] <- "Sir."
+Titles[Titles %in% c("Col.", "Capt.", "Major.")] <- "Officer."
+table(Titles)
+
+#Make new title a factor in data.combined
+data.combined$new.title <- as.factor(Titles)
+
+#Plot new version of titles
+ggplot(data.combined[1:891,], aes(x = new.title, fill = Survived)) +
+  geom_bar() +
+  facet_wrap(~Pclass) +
+  ggtitle("Survival Rates by New Title")
+
+#Collapse certain titles into Mrs and Mr to avoid overfitting
+indexes <- which(data.combined$new.title == "Lady.")
+data.combined$new.title[indexes] <- "Mrs."
+
+indexes <- which(data.combined$new.title == "Dr." |
+                   data.combined$new.title == "Sir." |
+                   data.combined$new.title == "Rev." |
+                   data.combined$new.title == "Officer.")
+data.combined$new.title[indexes] <- "Mr."
+
+#Visualize collapsed new.titles values
+ggplot(data.combined[1:891,], aes(x = new.title, fill = Survived)) +
+  geom_bar() +
+  facet_wrap(~Pclass) +
+  ggtitle("Survival Rates by New Title")
+
+#Run new single tree CV for collapsed titles
+features <- c("Pclass", "new.title", "FamilySize")
+rpart.train.2 <- data.combined[1:891, features]
+
+rpart.2.cv.1 <- rpart.cv(94622, rpart.train.2, rf.label, ctrl.3)
+rpart.2.cv.1
+
+#See new individual tree for collapsed titles
+prp(rpart.2.cv.1$finalModel, type = 0, extra = 1, under = TRUE)
+
+#See a small increase in accuracy but are not capturing the issue that
+#more first class males survive than third class males, initial tree
+#branch is purely predicated on being male, drill in and fix
+indexes.first.mr <- which(data.combined$new.title == "Mr." & data.combined$Pclass == "1")
+first.mr.df <- data.combined[indexes.first.mr,]
+summary(first.mr.df)
+
+#Why one female in "Mr."?
+first.mr.df[first.mr.df$Sex == "female",]
+
+#Fix mis-classified female in Mr. (Dr. Leader)
+indexes <- which(data.combined$new.title == "Mr." & data.combined$Sex == "female")
+data.combined$new.title[indexes] <- "Mrs."
+
+#Are there other mis-classes?
+length(which(data.combined$sex == "female" & (data.combined$new.title == "Master." |
+                  data.combined$new.title == "Mr.")))
+length(which(data.combined$sex == "male" & 
+               (data.combined$new.title == "Mrs." |
+                  data.combined$new.title == "Miss.")))
+
+#Refresh data frame
+indexes.first.mr <- which(data.combined$new.title == "Mr." & data.combined$Pclass == "1")
+first.mr.df <- data.combined[indexes.first.mr, ]
+
+#Which males survived in first class?
+summary(first.mr.df[first.mr.df$Survived == "1",])
+View(first.mr.df[first.mr.df$Survived == "1",])
+
+#Look at a few high fare tickets, using ticket number based on observation
+indexes <- which(data.combined$Ticket == "PC 17755" |
+                   data.combined$Ticket == "PC 17611" |
+                   data.combined$Ticket == "113760")
+View(data.combined[indexes,])
+
+#Look into issue that there may be ticket relationships not shown by
+#SibSp or Parch
+ggplot(first.mr.df, aes(x = Fare, fill = Survived)) +
+  geom_density(alpha = 0.5) +
+  ggtitle("1st Class 'Mr.' Survival Rates by fare")
+
+# Engineer features based on all the passengers with the same ticket
+ticket.party.size <- rep(0, nrow(data.combined))
+avg.fare <- rep(0.0, nrow(data.combined))
+tickets <- unique(data.combined$Ticket)
+
+for (i in 1:length(tickets)) {
+  current.ticket <- tickets[i]
+  party.indexes <- which(data.combined$Ticket == current.ticket)
+  current.avg.fare <- data.combined[party.indexes[1], "Fare"] / length(party.indexes)
+  
+  for (k in 1:length(party.indexes)) {
+    ticket.party.size[party.indexes[k]] <- length(party.indexes)
+    avg.fare[party.indexes[k]] <- current.avg.fare
+  }
+}
+
+data.combined$ticket.party.size <- ticket.party.size
+data.combined$avg.fare <- avg.fare
+
+#Refresh data frame
+indexes.first.mr <- which(data.combined$new.title == "Mr." & data.combined$Pclass == "1")
+first.mr.df <- data.combined[indexes.first.mr, ]
+
+#visualize new features involving fare and party size
+ggplot(first.mr.df[first.mr.df$Survived != "None",], aes(x = ticket.party.size, fill = Survived)) +
+  geom_density(alpha = 0.5) +
+  ggtitle("Survival Rates 1st Class 'Mr.' by ticket.party.size")
+
+ggplot(first.mr.df[first.mr.df$Survived != "None",], aes(x = avg.fare, fill = Survived)) +
+  geom_density(alpha = 0.5) +
+  ggtitle("Survival Rates 1st Class 'Mr.' by avg.fare")
+
+#Hypothesis - ticket party size is highly correlated with avg.fare
+summary(data.combined$avg.fare)
+
+#What is the missing value?
+data.combined[is.na(data.combined$avg.fare),]
+
+# Get records for similar passengers and summarize avg.fares
+indexes <- with(data.combined, which(Pclass == "3" & Title == "Mr." & FamilySize == 1 &
+                                       Ticket != "3701"))
+similar.na.passengers <- data.combined[indexes,]
+summary(similar.na.passengers$avg.fare)
+
+# Use median since close to mean and a little higher than mean
+data.combined[is.na(avg.fare), "avg.fare"] <- 7.840
+
+#Normalize the data with caret
+preproc.data.combined <- data.combined[, c("ticket.party.size", "avg.fare")]
+preProc <- preProcess(preproc.data.combined, method = c("center", "scale"))
+
+postproc.data.combined <- predict(preProc, preproc.data.combined)
+
+# Hypothesis refuted for all data
+cor(postproc.data.combined$ticket.party.size, postproc.data.combined$avg.fare)
+
+# How about for just 1st class all-up?
+indexes <- which(data.combined$Pclass == "1")
+cor(postproc.data.combined$ticket.party.size[indexes], 
+    postproc.data.combined$avg.fare[indexes])
+# Hypothesis refuted again, but substantial increase to me
+
+# OK, let's see if our feature engineering has made any difference
+features <- c("Pclass", "FamilySize", "new.title", "ticket.party.size", "avg.fare")
+rpart.train.3 <- data.combined[1:891, features]
+
+# Run CV and check out results
+rpart.3.cv.1 <- rpart.cv(94621, rpart.train.3, rf.label, ctrl.3)
+rpart.3.cv.1
+
+# Plot
+prp(rpart.3.cv.1$finalModel, type = 0, extra = 1, under = TRUE)
+# Result, still have not found a way to distinguish that 1st class males
+# are more likely to survive than other males
